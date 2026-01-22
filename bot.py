@@ -237,14 +237,18 @@ async def main():
     print(f"✅ PORT: {PORT}")
     print()
     
-    # Створюємо Telegram бота
-    application = Application.builder().token(BOT_TOKEN).build()
+    # Створюємо Telegram бота БЕЗ polling (тільки для відправки повідомлень)
+    application = Application.builder().token(BOT_TOKEN).updater(None).build()
     
     # Додаємо обробники команд
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CallbackQueryHandler(button_callback))
+    
+    # Ініціалізуємо бота
+    await application.initialize()
+    await application.start()
     
     # Додаємо keep-alive задачу (кожні 10 хвилин)
     job_queue = application.job_queue
@@ -268,26 +272,28 @@ async def main():
     print("🌐 Запуск веб-сервера...")
     await site.start()
     print(f"✅ Веб-сервер працює на порті {PORT}")
-    print()
-    
-    # Запускаємо Telegram бота
-    print("🤖 Запуск Telegram бота...")
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-    print("✅ Telegram бот працює!")
+    print("✅ Telegram бот готовий до прийому команд!")
     print()
     print("=" * 50)
     print("✅ ВСЕ ГОТОВО! Бот працює в штатному режимі")
     print("=" * 50)
     print()
     print("📱 URL для iPhone Shortcuts:")
-    print(f"   Відключення: https://ВАШ_ДОДАТОК.onrender.com/power_lost")
-    print(f"   Включення: https://ВАШ_ДОДАТОК.onrender.com/power_restored")
+    print(f"   Відключення: POST https://YOUR-APP.onrender.com/power_lost")
+    print(f"   Включення: POST https://YOUR-APP.onrender.com/power_restored")
     print()
     
+    # Запускаємо job queue
+    await application.job_queue.start()
+    
     # Тримаємо програму запущеною
-    await asyncio.Event().wait()
+    try:
+        await asyncio.Event().wait()
+    except (KeyboardInterrupt, SystemExit):
+        print("\n👋 Зупинка бота...")
+    finally:
+        await application.stop()
+        await application.shutdown()
 
 if __name__ == '__main__':
     try:
@@ -296,4 +302,5 @@ if __name__ == '__main__':
         print("\n👋 Бот зупинено")
     except Exception as e:
         print(f"\n❌ Критична помилка: {e}")
-        raise
+        import traceback
+        traceback.print_exc()

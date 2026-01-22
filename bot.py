@@ -5,8 +5,6 @@ from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from aiohttp import web
-from bs4 import BeautifulSoup
-import re
 
 # Конфігурація
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
@@ -20,8 +18,6 @@ class PowerMonitor:
         self.power_status = True
         self.last_outage_start = None
         self.outages_today = []
-        self.dtek_schedule = None
-        self.last_schedule_update = None
         
     def power_lost(self):
         self.power_status = False
@@ -73,83 +69,27 @@ def format_duration(td):
         return f"{hours}г {minutes}хв"
     return f"{minutes}хв"
 
-# ========== ПАРСИНГ ГРАФІКА ДТЕК ==========
-
-async def fetch_dtek_schedule():
-    """Парсить графік з сайту ДТЕК Київ"""
-    try:
-        url = 'https://www.dtek-krem.com.ua/ua/shutdowns'
-        
-        async with aiohttp.ClientSession() as session:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-            async with session.get(url, headers=headers, timeout=15) as response:
-                if response.status != 200:
-                    return None
-                
-                html = await response.text()
-                soup = BeautifulSoup(html, 'html.parser')
-                
-                # Шукаємо інформацію про групу 3.2
-                schedule_info = {
-                    'date': datetime.now().strftime('%d.%m.%Y'),
-                    'group': DTEK_GROUP,
-                    'schedule': 'Інформація оновлюється...'
-                }
-                
-                # Спроба знайти таблицю або текст з графіком
-                # Структура сайту може змінюватись, тому робимо загальний пошук
-                text = soup.get_text()
-                
-                # Шукаємо згадки про групу 3.2
-                group_pattern = rf'(група|черга|підгрупа)[\s:]*{re.escape(DTEK_GROUP)}'
-                matches = re.finditer(group_pattern, text, re.IGNORECASE)
-                
-                schedule_text = "Графік не знайдено автоматично.\n"
-                schedule_text += "Перевірте вручну: https://www.dtek-krem.com.ua/ua/shutdowns"
-                
-                for match in matches:
-                    start = max(0, match.start() - 100)
-                    end = min(len(text), match.end() + 200)
-                    context = text[start:end]
-                    if any(time_word in context.lower() for time_word in ['година', 'год', ':', 'з ', 'до ']):
-                        schedule_text = context.strip()
-                        break
-                
-                schedule_info['schedule'] = schedule_text
-                monitor.dtek_schedule = schedule_info
-                monitor.last_schedule_update = datetime.now()
-                
-                print(f"✅ График ДТЕК оновлено: {datetime.now().strftime('%H:%M')}")
-                return schedule_info
-                
-    except Exception as e:
-        print(f"❌ Помилка парсингу ДТЕК: {e}")
-        return None
-
-# ========== КОМАНДИ БОТА ==========
+# ========== МЕНЮ ==========
 
 def get_main_menu_keyboard():
     """Головне меню з кнопками"""
     keyboard = [
         [
-            InlineKeyboardButton("⚡ Статус зараз", callback_data='status'),
+            InlineKeyboardButton("⚡ Статус", callback_data='status'),
             InlineKeyboardButton("📊 Статистика", callback_data='stats')
         ],
         [
             InlineKeyboardButton("📅 График ДТЕК", callback_data='schedule'),
-            InlineKeyboardButton("🕐 Історія сьогодні", callback_data='history')
+            InlineKeyboardButton("🕐 Історія", callback_data='history')
         ],
         [
             InlineKeyboardButton("📈 Аналітика", callback_data='analytics'),
             InlineKeyboardButton("🔔 Прогноз", callback_data='forecast')
-        ],
-        [
-            InlineKeyboardButton("🔄 Оновити графік", callback_data='refresh_schedule')
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
+
+# ========== КОМАНДИ ==========
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /start"""
@@ -161,16 +101,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>Що я вмію:</b>\n"
         f"⚡ Відстежую відключення в реальному часі\n"
         f"📊 Веду детальну статистику\n"
-        f"📅 Показую графік ДТЕК\n"
-        f"📈 Аналізую тренди\n"
-        f"🔔 Прогнозую наступні відключення\n\n"
-        f"Виберіть дію:",
+        f"📈 Аналізую тренди та закономірності\n"
+        f"🔔 Прогнозую наступні відключення\n"
+        f"🕐 Показую історію за день\n\n"
+        f"Виберіть дію з меню:",
         parse_mode='HTML',
         reply_markup=get_main_menu_keyboard()
     )
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /menu - показати меню"""
+    """Команда /menu"""
     await update.message.reply_text(
         "📋 <b>ГОЛОВНЕ МЕНЮ</b>\n\nВиберіть потрібну опцію:",
         parse_mode='HTML',
@@ -240,10 +180,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if monitor.power_status:
             msg = "🟢 <b>СВІТЛО Є</b>\n\n"
             msg += f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+            
+            if monitor.outages_today:
+                last = monitor.outages_today[-1]
+                msg += f"\n\nОстаннє відключення:\n{last['start'].strftime('%H:%M')} • {format_duration(last['duration'])}"
         else:
             duration = monitor.get_current_duration()
             msg = f"🔴 <b>СВІТЛА НЕМАЄ</b>\n\n"
-            msg += f"⏱ Вже {format_duration(duration)}"
+            msg += f"⏱ Вже {format_duration(duration)}\n"
+            msg += f"🔌 Зникло о {monitor.last_outage_start.strftime('%H:%M')}"
         
         await query.edit_message_text(
             msg,
@@ -256,7 +201,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stats = monitor.get_stats()
         if stats:
             msg = "📊 <b>СТАТИСТИКА</b>\n\n"
-            msg += f"Відключень: {stats['count']}\n"
+            msg += f"Відключень: <b>{stats['count']}</b>\n"
             msg += f"Загальний час: {format_duration(stats['total'])}\n"
             msg += f"Середня тривалість: {format_duration(stats['avg'])}"
         else:
@@ -269,24 +214,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif query.data == 'schedule':
-        # График ДТЕК
-        await query.edit_message_text("⏳ Завантажую графік ДТЕК...")
-        
-        schedule = await fetch_dtek_schedule()
-        
-        if schedule:
-            msg = f"📅 <b>ГРАФИК ДТЕК</b>\n\n"
-            msg += f"🏠 Група: <b>{schedule['group']}</b>\n"
-            msg += f"📍 Київ\n"
-            msg += f"📆 Дата: {schedule['date']}\n\n"
-            msg += f"<b>Інформація:</b>\n{schedule['schedule']}\n\n"
-            
-            if monitor.last_schedule_update:
-                msg += f"🔄 Оновлено: {monitor.last_schedule_update.strftime('%H:%M')}"
-        else:
-            msg = "❌ Не вдалось завантажити графік.\n\n"
-            msg += "🔗 Перевірте вручну:\n"
-            msg += "https://www.dtek-krem.com.ua/ua/shutdowns"
+        # График ДТЕК - просто посилання
+        msg = f"📅 <b>ГРАФИК ВІДКЛЮЧЕНЬ ДТЕК</b>\n\n"
+        msg += f"🏠 Ваша група: <b>{DTEK_GROUP}</b>\n"
+        msg += f"📍 Місто: <b>Київ</b>\n\n"
+        msg += f"🔗 Актуальний графік дивіться тут:\n"
+        msg += f"https://www.dtek-krem.com.ua/ua/shutdowns\n\n"
+        msg += f"💡 <b>Порада:</b> Додайте сайт в закладки для швидкого доступу!"
         
         await query.edit_message_text(
             msg,
@@ -305,6 +239,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 end = (outage['start'] + outage['duration']).strftime('%H:%M')
                 duration = format_duration(outage['duration'])
                 msg += f"{i}. {start} - {end} ({duration})\n"
+            
+            total = sum([o['duration'] for o in monitor.outages_today], timedelta(0))
+            msg += f"\n⏱ <b>Всього:</b> {format_duration(total)}"
         
         await query.edit_message_text(
             msg,
@@ -327,7 +264,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 worst_hour = hour_counts.most_common(1)[0]
                 
                 msg = "📈 <b>АНАЛІТИКА</b>\n\n"
-                msg += f"🔴 Найгірша година: <b>{worst_hour[0]}:00</b>\n"
+                msg += f"🔴 Найгірша година: <b>{worst_hour[0]}:00 - {worst_hour[0]+1}:00</b>\n"
                 msg += f"   ({worst_hour[1]} відключень)\n\n"
                 
                 # Середній інтервал між відключеннями
@@ -340,13 +277,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         intervals.append(interval)
                     
                     avg_interval = sum(intervals, timedelta(0)) / len(intervals)
-                    msg += f"⏱ Середній інтервал між відключеннями:\n"
+                    msg += f"⏱ Середній інтервал:\n"
                     msg += f"   {format_duration(avg_interval)}\n\n"
                 
                 # Процент часу без світла
-                total_time = datetime.now() - datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                now = datetime.now()
+                day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                total_time = now - day_start
                 percent = (stats['total'].total_seconds() / total_time.total_seconds()) * 100
-                msg += f"⚡ Без світла сьогодні: <b>{percent:.1f}%</b> часу"
+                msg += f"⚡ Без світла сьогодні:\n"
+                msg += f"   <b>{percent:.1f}%</b> часу ({format_duration(stats['total'])})"
             else:
                 msg = "📈 <b>АНАЛІТИКА</b>\n\nНедостатньо даних."
         
@@ -357,14 +297,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif query.data == 'forecast':
-        # Прогноз
+        # Прогноз на основі історії
         msg = "🔔 <b>ПРОГНОЗ НАСТУПНОГО ВІДКЛЮЧЕННЯ</b>\n\n"
         
-        if monitor.dtek_schedule:
-            msg += f"📅 За графіком ДТЕК:\n{monitor.dtek_schedule['schedule']}\n\n"
-        
-        # Базуємось на історії
         if len(monitor.outages_today) >= 2:
+            # Розраховуємо середній інтервал
             intervals = []
             for i in range(1, len(monitor.outages_today)):
                 prev_end = monitor.outages_today[i-1]['start'] + monitor.outages_today[i-1]['duration']
@@ -374,38 +311,28 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             avg_interval = sum(intervals, timedelta(0)) / len(intervals)
             
-            if monitor.power_status:
+            if monitor.power_status and monitor.outages_today:
                 last_end = monitor.outages_today[-1]['start'] + monitor.outages_today[-1]['duration']
                 predicted_next = last_end + avg_interval
                 
                 if predicted_next > datetime.now():
                     time_until = predicted_next - datetime.now()
-                    msg += f"⏰ Можливо через: {format_duration(time_until)}\n"
-                    msg += f"   (прогноз о {predicted_next.strftime('%H:%M')})\n\n"
-                    msg += f"⚠️ Це лише прогноз на основі сьогоднішньої історії!"
+                    msg += f"⏰ <b>Прогноз на основі історії:</b>\n"
+                    msg += f"Можливо через: <b>{format_duration(time_until)}</b>\n"
+                    msg += f"(приблизно о {predicted_next.strftime('%H:%M')})\n\n"
+                    msg += f"📊 Базується на {len(monitor.outages_today)} відключеннях сьогодні\n\n"
+                else:
+                    msg += f"⏰ За розрахунками вже мало б відключити.\n"
+                    msg += f"Можливо графік змінився.\n\n"
+            else:
+                msg += f"⚠️ Зараз немає світла, прогноз не доступний.\n\n"
+            
+            msg += f"⚠️ <b>Увага:</b> Це лише прогноз!\n"
+            msg += f"Точний графік дивіться на сайті ДТЕК."
         else:
-            msg += "Недостатньо даних для прогнозу.\n"
-            msg += "Перевірте графік ДТЕК 👆"
-        
-        await query.edit_message_text(
-            msg,
-            parse_mode='HTML',
-            reply_markup=get_main_menu_keyboard()
-        )
-    
-    elif query.data == 'refresh_schedule':
-        # Оновити графік
-        await query.edit_message_text("⏳ Оновлюю графік ДТЕК...")
-        
-        schedule = await fetch_dtek_schedule()
-        
-        if schedule:
-            msg = "✅ <b>Графік оновлено!</b>\n\n"
-            msg += f"📅 {schedule['date']}\n"
-            msg += f"🏠 Група {schedule['group']}\n\n"
-            msg += f"{schedule['schedule']}"
-        else:
-            msg = "❌ Не вдалось оновити графік"
+            msg += f"Недостатньо даних для прогнозу.\n"
+            msg += f"Потрібно мінімум 2 відключення.\n\n"
+            msg += f"📅 Дивіться графік ДТЕК натиснувши кнопку вище."
         
         await query.edit_message_text(
             msg,
@@ -488,10 +415,6 @@ async def keep_alive_task(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"⚠️ Keep-alive: {e}")
 
-async def auto_update_schedule(context: ContextTypes.DEFAULT_TYPE):
-    """Автооновлення графіка кожні 6 годин"""
-    await fetch_dtek_schedule()
-
 # ========== ГОЛОВНА ФУНКЦІЯ ==========
 
 async def main():
@@ -526,7 +449,6 @@ async def main():
     # Задачі
     if application.job_queue:
         application.job_queue.run_repeating(keep_alive_task, interval=600, first=60)
-        application.job_queue.run_repeating(auto_update_schedule, interval=21600, first=10)
     
     # Запускаємо polling
     polling_task = asyncio.create_task(application.updater.start_polling())
@@ -549,12 +471,8 @@ async def main():
     if application.job_queue:
         await application.job_queue.start()
     
-    # Завантажуємо графік при старті
-    await fetch_dtek_schedule()
-    
     print(f"✅ Веб-сервер на порті {PORT}")
     print("🤖 Telegram бот готовий!")
-    print("📅 График ДТЕК завантажено")
     print()
     print("=" * 50)
     print("✅ ВСЕ ГОТОВО!")
